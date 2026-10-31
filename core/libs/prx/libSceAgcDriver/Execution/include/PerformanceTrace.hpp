@@ -301,6 +301,7 @@ struct TraceSummary {
     std::optional<std::pair<double, double>> interval;
     std::optional<TraceHost> host;
     std::optional<TraceTitle> title;
+    bool fullPhaseTotals = false;
 };
 
 struct TraceBenchInterval {
@@ -640,7 +641,33 @@ public:
             AppendString(output, top[index].first);
             output += ':' + number(milliseconds(top[index].second) * perPresent);
         }
-        output += "},\"trace_dropped\":";
+        output += "}";
+        if (summary.fullPhaseTotals) {
+            output += ",\"full_phase_totals\":{\"thread_index_kind\":\"snapshot_local\",\"timing\":\"inclusive_wall\",\"threads\":[";
+            for (std::size_t index = 0; index < threads.size(); ++index) {
+                if (index != 0) output += ',';
+                const auto& thread = threads[index];
+                output += "{\"thread_index\":" + std::to_string(index) + ",\"name\":";
+                AppendString(output, thread.name);
+                output += ",\"totals_full\":";
+                output += thread.totalsFull ? "true" : "false";
+                output += ",\"phase_count\":" + std::to_string(thread.totals.size()) + ",\"phases\":[";
+                for (std::size_t phase = 0; phase < thread.totals.size(); ++phase) {
+                    if (phase != 0) output += ',';
+                    const auto& total = thread.totals[phase];
+                    output += "{\"scope\":";
+                    AppendString(output, total.scope);
+                    output += ",\"stage\":";
+                    if (total.stage != nullptr) AppendString(output, total.stage);
+                    else output += "null";
+                    output += ",\"count\":" + std::to_string(total.count);
+                    output += ",\"total_ns\":" + std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(total.length).count()) + "}";
+                }
+                output += "]}";
+            }
+            output += "]}";
+        }
+        output += ",\"trace_dropped\":";
         output += dropped ? "true" : "false";
         if (!droppedList.empty()) {
             std::string droppedThreads;

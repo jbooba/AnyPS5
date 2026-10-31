@@ -259,6 +259,82 @@ void SummaryFields() {
     Check(merged.find("shader prepare") == merged.rfind("shader prepare"), "threads with one name were listed twice");
 }
 
+void FullPhaseTotals() {
+    AgcDriver::TraceSummary summary;
+    const std::vector<TraceThread::Snapshot> threads{
+        {"draw \"worker\"\n", {}, {
+            {"Graphics.Draw.inputs", nullptr, std::chrono::nanoseconds(12345678901234567ll), 18446744073709551614ull},
+            {"Graphics.Draw.inputs", "validate", std::chrono::nanoseconds(101), 2},
+            {"Graphics.Draw.inputs", "index_prepare", std::chrono::nanoseconds(102), 3},
+            {"Graphics.Draw.inputs", "vertex_layout", std::chrono::nanoseconds(103), 4},
+            {"Graphics.Draw.inputs", "vertex_plan", std::chrono::nanoseconds(104), 5},
+            {"Graphics.Draw.inputs", "vertex_prepare", std::chrono::nanoseconds(105), 6},
+            {"Graphics.Draw.inputs", "vertex_bindings", std::chrono::nanoseconds(106), 7},
+            {"Graphics.Draw.vertex_copy", "read", std::chrono::nanoseconds(99), 8},
+            {"Driver.WorkerWait", nullptr, std::chrono::nanoseconds(108), 9},
+            {"counter", "zero", Clock::duration::zero(), 10},
+            {"Graphics.Draw.inputs.validate", nullptr, std::chrono::nanoseconds(110), 11},
+            {"scope\"\\", "stage\n\t", std::chrono::nanoseconds(111), 12},
+        }, false},
+        {"draw \"worker\"\n", {}, {{"Graphics.Draw.inputs", "validate", std::chrono::nanoseconds(7), 1}}, true, 0, {}, true},
+    };
+    const auto baseline = TraceFormat::Summary(summary, threads, {});
+    Check(baseline.find("full_phase_totals") == std::string::npos, "full phase totals were enabled by default");
+    summary.fullPhaseTotals = true;
+    const auto line = TraceFormat::Summary(summary, threads, {});
+    const auto full = line.substr(line.find(R"json("full_phase_totals":)json"));
+    Check(full.starts_with(R"json("full_phase_totals":{"thread_index_kind":"snapshot_local","timing":"inclusive_wall","threads":[{"thread_index":0,"name":"draw \"worker\"\u000a","totals_full":false,"phase_count":12,"phases":[)json"), "full phase thread identity or scope count changed");
+    Check(full.find(R"json({"scope":"Graphics.Draw.inputs","stage":null,"count":18446744073709551614,"total_ns":12345678901234567})json") != std::string::npos, "full phase totals rounded an integer count or duration");
+    const std::array<const char*, 6> stages{"validate", "index_prepare", "vertex_layout", "vertex_plan", "vertex_prepare", "vertex_bindings"};
+    for (std::size_t index = 0; index < stages.size(); ++index) {
+        const auto phase = std::string(R"json({"scope":"Graphics.Draw.inputs","stage":")json") + stages[index] + R"json(","count":)json" + std::to_string(index + 2) + R"json(,"total_ns":)json" + std::to_string(index + 101) + "}";
+        Check(full.find(phase) != std::string::npos, "a draw input phase below the top-eight cutoff was lost");
+    }
+    Check(full.find(R"json({"scope":"Graphics.Draw.vertex_copy","stage":"read","count":8,"total_ns":99})json") != std::string::npos, "a nested inclusive child was subtracted or dropped");
+    Check(full.find(R"json({"scope":"Driver.WorkerWait","stage":null,"count":9,"total_ns":108})json") != std::string::npos, "the full totals applied the top-phase worker-wait filter");
+    Check(full.find(R"json({"scope":"counter","stage":"zero","count":10,"total_ns":0})json") != std::string::npos, "a zero-duration counted phase was lost");
+    Check(full.find(R"json({"scope":"Graphics.Draw.inputs.validate","stage":null,"count":11,"total_ns":110})json") != std::string::npos, "a literal dot in a scope was merged with a stage");
+    Check(full.find(R"json({"scope":"scope\"\\","stage":"stage\u000a\u0009","count":12,"total_ns":111})json") != std::string::npos, "full phase scope or stage strings were not JSON escaped");
+    Check(full.find(R"json({"thread_index":1,"name":"draw \"worker\"\u000a","totals_full":true,"phase_count":1,"phases":[{"scope":"Graphics.Draw.inputs","stage":"validate","count":1,"total_ns":7}]})json") != std::string::npos, "same-name threads or their total-table overflow flags were merged");
+    Check(line.find(R"json("presents":0)json") != std::string::npos && line.find(R"json("total_ns":12345678901234567)json") != std::string::npos, "a summary without presents discarded raw phase totals");
+    summary.fullPhaseTotals = false;
+    Check(TraceFormat::Summary(summary, threads, {}) == baseline, "disabling full totals changed legacy summary bytes");
+    summary.fullPhaseTotals = true;
+    Check(TraceFormat::Summary(summary, {}, {}).find(R"json("full_phase_totals":{"thread_index_kind":"snapshot_local","timing":"inclusive_wall","threads":[]})json") != std::string::npos, "an empty snapshot produced an invalid full totals array");
+}
+
+void FullPhaseIntervalTotals() {
+    std::atomic<std::uint64_t> presents{0};
+    std::atomic<bool> buffering{false};
+    TraceThread thread("draw finisher", presents, 0, buffering);
+    const auto origin = Clock::now();
+    thread.Add("Graphics.Draw.inputs", nullptr, origin, origin + std::chrono::nanoseconds(100));
+    thread.Add("Graphics.Draw.inputs", "validate", origin, origin + std::chrono::nanoseconds(25));
+    const auto before = thread.Collect();
+    thread.Add("Graphics.Draw.inputs", nullptr, origin, origin + std::chrono::nanoseconds(200));
+    thread.Add("Graphics.Draw.inputs", "validate", origin, origin + std::chrono::nanoseconds(50));
+    thread.Add("Graphics.Draw.inputs", "index_prepare", origin, origin);
+    auto snapshot = thread.Collect();
+    Check(snapshot.slices.empty() && !snapshot.dropped, "summary-only phase collection started buffering events");
+    const auto cumulative = snapshot.totals;
+    snapshot.totals = TraceFormat::Since(cumulative, before.totals);
+    AgcDriver::TraceSummary summary;
+    summary.fullPhaseTotals = true;
+    const auto line = TraceFormat::Summary(summary, std::array{snapshot}, {});
+    Check(line.find(R"json("scope":"Graphics.Draw.inputs","stage":null,"count":1,"total_ns":200)json") != std::string::npos, "full totals exported cumulative time instead of the interval delta");
+    Check(line.find(R"json("scope":"Graphics.Draw.inputs","stage":"validate","count":1,"total_ns":50)json") != std::string::npos, "an interval stage duration or count changed");
+    Check(line.find(R"json("scope":"Graphics.Draw.inputs","stage":"index_prepare","count":1,"total_ns":0)json") != std::string::npos, "a new zero-duration interval phase was discarded");
+    snapshot.totals = TraceFormat::Since(thread.Collect().totals, cumulative);
+    Check(TraceFormat::Summary(summary, std::array{snapshot}, {}).find(R"json("phase_count":0,"phases":[])json") != std::string::npos, "an idle interval repeated the preceding phase totals");
+    TraceThread bounded("draw committer", presents, 1);
+    bounded.Add("Graphics.Draw.inputs", "vertex_prepare", origin, origin + microseconds(30));
+    bounded.Add("Graphics.Draw.inputs", "vertex_prepare", origin, origin + microseconds(40));
+    snapshot = bounded.Collect();
+    Check(snapshot.eventsLost == 1 && !snapshot.totalsFull, "the phase export event-buffer fixture did not fill independently of its totals table");
+    const auto full = TraceFormat::Summary(summary, std::array{snapshot}, {});
+    Check(full.find(R"json("totals_full":false,"phase_count":1)json") != std::string::npos && full.find(R"json("stage":"vertex_prepare","count":2,"total_ns":70000)json") != std::string::npos, "a full event buffer truncated uncensored phase totals");
+}
+
 void GpuClock() {
     const auto origin = Clock::now();
     const AgcDriver::TraceClockSample first{1000.0, origin + microseconds(10)};
@@ -612,6 +688,8 @@ int main() {
         EventsShape();
         BatchIds();
         SummaryFields();
+        FullPhaseTotals();
+        FullPhaseIntervalTotals();
         GpuClock();
         IntervalDue();
         SummaryOnlyThread();

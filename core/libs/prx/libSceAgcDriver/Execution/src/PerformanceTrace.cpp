@@ -56,6 +56,7 @@ struct Session {
     std::optional<TraceClockSample> gpuClock;
     std::vector<Clock::time_point> presents;
     bool bench = false;
+    bool phaseTotals = false;
     TraceBenchIntervals benchIntervals;
     std::uint64_t benchDropped = 0;
 };
@@ -185,7 +186,7 @@ std::vector<std::pair<std::string, std::string>> environment() {
     return result;
 }
 
-TraceSummary identity(std::uint32_t width, std::uint32_t height, const VulkanDevice* device) {
+TraceSummary identity(std::uint32_t width, std::uint32_t height, const VulkanDevice* device, bool phaseTotals) {
     TraceSummary summary;
     summary.commit = APS5_TRACE_COMMIT;
     if (APS5_TRACE_DIRTY >= 0) summary.dirty = APS5_TRACE_DIRTY != 0;
@@ -198,6 +199,7 @@ TraceSummary identity(std::uint32_t width, std::uint32_t height, const VulkanDev
     summary.host = host();
     static const auto running = title();
     summary.title = running;
+    summary.fullPhaseTotals = phaseTotals;
     return summary;
 }
 
@@ -294,7 +296,7 @@ void PerformanceTrace::FlushInterval(Clock::time_point now, std::uint32_t width,
         state.intervalBase[index] = std::move(totals);
         snapshots.push_back(std::move(snapshot));
     }
-    auto summary = identity(width, height, device);
+    auto summary = identity(width, height, device, state.phaseTotals);
     summary.window = state.interval->Describe();
     summary.firstPresent = state.intervalFirstPresent;
     summary.gpuBusyMs = VulkanDevice::PresentCounts().gpuBusyMs - state.intervalGpuBusy;
@@ -328,6 +330,7 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
         state.window = TraceWindow::Parse(std::getenv("APS5_TRACE_FRAMES"), std::getenv("APS5_TRACE_SECONDS"));
         state.interval = TraceInterval::Parse(std::getenv("APS5_TRACE_SUMMARY_EVERY"));
         state.bench = TraceBench::Parse(std::getenv("APS5_TRACE_BENCH"), state.interval.has_value());
+        state.phaseTotals = std::getenv("APS5_TRACE_PHASE_TOTALS") != nullptr;
         state.first = now;
         state.started = true;
     }
@@ -393,7 +396,7 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
         snapshots.push_back({"gpu", gpuSlices, {}, gpuLost != 0, gpuLost});
     }
     const auto process = processId();
-    auto summary = identity(width, height, device);
+    auto summary = identity(width, height, device, state.phaseTotals);
     summary.window = state.window->Describe();
     summary.firstPresent = state.firstPresent;
     summary.gpuBusyMs = VulkanDevice::PresentCounts().gpuBusyMs - state.gpuBusyAtOpen;
